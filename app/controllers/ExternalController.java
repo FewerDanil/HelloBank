@@ -2,9 +2,13 @@ package controllers;
 
 import akka.dispatch.Futures;
 import com.fasterxml.jackson.databind.JsonNode;
-import models.Test;
+import controllers.utils.*;
+import dao.UserCredentialsDao;
+import dao.UserDao;
+import exceptions.*;
+import models.User;
+import models.UserCredentials;
 import play.db.jpa.JPA;
-import play.db.jpa.Transactional;
 import play.libs.Akka;
 import play.libs.F;
 import play.mvc.Controller;
@@ -18,35 +22,69 @@ import javax.persistence.EntityTransaction;
 public class ExternalController extends Controller {
     public static final String jpaDB = "default";
 
-    public static F.Promise<Result> test() {
+    public static F.Promise<Result> createUser() {
         Http.RequestBody body = request().body();
 
         Future<Result> f = Futures.future(() -> {
             EntityManager em = null;
             EntityTransaction tx = null;
-            Result result;
+            Status status;
 
             try {
                 em = JPA.em(jpaDB);
                 tx = em.getTransaction();
-                String str;
+                String email, password, displayName;
 
                 try {
                     JsonNode json = body.asJson();
 
-                    str = json.get("string").asText();
+                    email = json.get("email").asText();
+                    password = json.get("password").asText();
+                    displayName = json.get("display_name").asText();
                 } catch (Exception e) {
-                    throw new Exception("json error");
+                    throw new WrongJsonFormatException();
                 }
 
                 tx.begin();
 
-                em.persist(new Test(str));
-                result = ok("ok");
+                if(UserCredentialsDao.getUserCredentialsByEmail(em, email) != null) {
+                    throw new EmailExistsException();
+                }
+
+                if(UserDao.getUserByDisplayName(em, displayName) != null) {
+                    throw new DisplayNameExistsException();
+                }
+
+                if(!PasswordUtil.checkPassword(password)) {
+                    throw new PasswordTooEasyException();
+                }
+
+                if(!EmailUtil.checkEmail(email)) {
+                    throw new EmailNotValidException();
+                }
+
+                User user = new User(
+                        UserIdGenerationUtil.generate(),
+                        displayName,
+                        false);
+
+                UserCredentials userCredentials = new UserCredentials(
+                        user,
+                        email,
+                        PasswordUtil.encrypt(password),
+                        SessionGenerationUtil.generate(user.getUserId()));
+
+                em.persist(user);
+                em.persist(userCredentials);
 
                 tx.commit();
+
+                status = ok(
+                        "{" +
+                        "\"status\":200" +
+                        "}");
             } catch (Exception e) {
-                result = ok(e.getMessage());
+                status = ExceptionConvertingUtil.convert(e);
             } finally {
                 if (em != null) {
                     em.close();
@@ -57,7 +95,7 @@ public class ExternalController extends Controller {
                 }
             }
 
-            return result;
+            return status.as("application/json");
         }, Akka.system().dispatcher());
 
         return F.Promise.wrap(f);
